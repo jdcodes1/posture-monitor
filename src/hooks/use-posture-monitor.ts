@@ -155,6 +155,7 @@ export function usePostureMonitor(userId?: string | null) {
   }, []);
 
   // Set ready once MediaPipe loads
+  const autoCalibrationTriggered = useRef(false);
   useEffect(() => {
     if (!mpLoading && !mpError) {
       setStatus('ready');
@@ -260,7 +261,25 @@ export function usePostureMonitor(userId?: string | null) {
       monitorRef.current.calibrate(baseline);
       saveBaseline(baseline);
       setIsCalibrated(true);
-      setStatus('ready');
+      // Auto-start monitoring after successful calibration
+      setTimeout(() => {
+        monitorRef.current.start();
+        isMonitoringRef.current = true;
+        setStatus('monitoring');
+        syncState();
+        if (isForegroundRef.current) {
+          cameraRef.current.acquire().then((v) => {
+            if (videoRef.current) {
+              videoRef.current.srcObject = v.srcObject;
+              videoRef.current.play().catch(() => {});
+            }
+            startForegroundLoop();
+          }).catch(() => {});
+        } else {
+          cameraRef.current.release();
+          startBackgroundLoop();
+        }
+      }, 100);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Calibration failed');
       setStatus('ready');
@@ -271,6 +290,14 @@ export function usePostureMonitor(userId?: string | null) {
       cameraRef.current.release();
     }
   }, [detectOnce]);
+
+  // Auto-calibrate when model is ready and no saved baseline
+  useEffect(() => {
+    if (status === 'ready' && !autoCalibrationTriggered.current && !isCalibrated) {
+      autoCalibrationTriggered.current = true;
+      setTimeout(() => calibrate(), 500);
+    }
+  }, [status, isCalibrated, calibrate]);
 
   // Start monitoring
   const startMonitoring = useCallback(() => {
