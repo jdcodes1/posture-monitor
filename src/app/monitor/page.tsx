@@ -77,6 +77,22 @@ export default function MonitorPage() {
             onStop={stopMonitoring}
           />
         )}
+
+        {/* Pop out as small window for background use */}
+        {status === 'monitoring' && (
+          <button
+            onClick={() => {
+              window.open(
+                window.location.href,
+                '_blank',
+                'width=320,height=380,menubar=no,toolbar=no,location=no,status=no'
+              );
+            }}
+            className="mt-4 w-full text-center text-xs text-[#5c6370] hover:text-[#c8cfd8] transition-colors cursor-pointer"
+          >
+            ↗ Pop out as tiny window
+          </button>
+        )}
       </div>
     </main>
   );
