@@ -20,8 +20,8 @@ struct MonitorStats {
 class PostureMonitor {
     weak var delegate: PostureMonitorDelegate?
 
-    private let analyzer = PoseAnalyzer()
-    private let camera = CameraCapture()
+    let analyzer = PoseAnalyzer()
+    let camera = CameraCapture()
     private let battery = BatteryMonitor()
     private let settingsStore = SettingsStore()
     private let statsStore = StatsStore()
@@ -51,17 +51,29 @@ class PostureMonitor {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
+            // Start camera and let it warm up
+            guard self.camera.start() else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            Thread.sleep(forTimeInterval: 1.0) // warmup
+
             var samples: [PoseMetrics] = []
-            for _ in 0..<5 {
-                if let frame = self.camera.captureFrame(),
+            var attempts = 0
+            // Try up to 15 times to get 5 good samples
+            while samples.count < 5 && attempts < 15 {
+                attempts += 1
+                if let frame = self.camera.getLatestFrame(),
                    let metrics = self.analyzer.analyze(pixelBuffer: frame) {
                     samples.append(metrics)
                 }
-                Thread.sleep(forTimeInterval: 0.6)
+                Thread.sleep(forTimeInterval: 0.5)
             }
 
+            // Keep camera running (for preview), don't stop here
+
             DispatchQueue.main.async {
-                if samples.count >= 3 {
+                if samples.count >= 2 {
                     self.baseline = self.analyzer.average(samples: samples)
                     self.settingsStore.saveBaseline(self.baseline!)
                     completion(true)

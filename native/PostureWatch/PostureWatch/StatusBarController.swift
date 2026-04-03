@@ -1,6 +1,7 @@
 import Cocoa
+import AVFoundation
 
-class StatusBarController: PostureMonitorDelegate {
+class StatusBarController: NSObject, PostureMonitorDelegate {
     private let statusItem: NSStatusItem
     private let monitor = PostureMonitor()
 
@@ -8,8 +9,10 @@ class StatusBarController: PostureMonitorDelegate {
     private var statsMenuItem: NSMenuItem!
     private var pauseMenuItem: NSMenuItem!
     private var calibrateMenuItem: NSMenuItem!
+    private var previewMenuItem: NSMenuItem!
     private var sensitivityMenu: NSMenu!
     private var intervalMenu: NSMenu!
+    private var previewLayer: AVCaptureVideoPreviewLayer?
 
     private let colors: [PostureStatus: NSColor] = [
         .good: NSColor(red: 62/255, green: 232/255, blue: 165/255, alpha: 1),
@@ -18,8 +21,9 @@ class StatusBarController: PostureMonitorDelegate {
     ]
     private let grayColor = NSColor(red: 92/255, green: 99/255, blue: 112/255, alpha: 1)
 
-    init() {
+    override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
         monitor.delegate = self
 
         updateIcon(.good)
@@ -40,6 +44,7 @@ class StatusBarController: PostureMonitorDelegate {
 
     private func setupMenu() {
         let menu = NSMenu()
+        menu.delegate = self
 
         let titleItem = NSMenuItem(title: "posture//watch", action: nil, keyEquivalent: "")
         titleItem.attributedTitle = NSAttributedString(
@@ -47,6 +52,18 @@ class StatusBarController: PostureMonitorDelegate {
             attributes: [.font: NSFont.monospacedSystemFont(ofSize: 12, weight: .semibold)]
         )
         menu.addItem(titleItem)
+        menu.addItem(NSMenuItem.separator())
+
+        // Camera preview (custom view in menu item)
+        previewMenuItem = NSMenuItem()
+        let previewView = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 180))
+        previewView.wantsLayer = true
+        previewView.layer?.backgroundColor = NSColor.black.cgColor
+        previewView.layer?.cornerRadius = 8
+        previewView.layer?.masksToBounds = true
+        previewMenuItem.view = previewView
+        menu.addItem(previewMenuItem)
+
         menu.addItem(NSMenuItem.separator())
 
         statusMenuItem = NSMenuItem(title: "Initializing...", action: nil, keyEquivalent: "")
@@ -101,6 +118,37 @@ class StatusBarController: PostureMonitorDelegate {
         statusItem.menu = menu
     }
 
+    // MARK: - Camera Preview
+
+    private func startPreview() {
+        guard let session = monitor.camera.session ?? {
+            _ = monitor.camera.start()
+            return monitor.camera.session
+        }() else { return }
+
+        guard let view = previewMenuItem.view else { return }
+
+        if previewLayer == nil {
+            let layer = AVCaptureVideoPreviewLayer(session: session)
+            layer.videoGravity = .resizeAspectFill
+            layer.frame = view.bounds
+            // Mirror the preview horizontally
+            layer.connection?.automaticallyAdjustsVideoMirroring = false
+            layer.connection?.isVideoMirrored = true
+            view.layer?.addSublayer(layer)
+            previewLayer = layer
+        }
+    }
+
+    private func stopPreview() {
+        previewLayer?.removeFromSuperlayer()
+        previewLayer = nil
+        // Only stop camera if not actively monitoring
+        if monitor.isPaused {
+            monitor.camera.stop()
+        }
+    }
+
     // MARK: - Actions
 
     @objc private func changeSensitivity(_ sender: NSMenuItem) {
@@ -144,8 +192,10 @@ class StatusBarController: PostureMonitorDelegate {
             if success {
                 self?.monitor.startMonitoring()
                 self?.updateStatus("Monitoring — Good posture", stats: nil)
+                self?.updateIcon(.good)
             } else {
-                self?.statusMenuItem.title = "Calibration failed — try Recalibrate"
+                self?.statusMenuItem.title = "Calibration failed — click Recalibrate"
+                self?.updateIcon(nil)
             }
         }
     }
@@ -178,5 +228,17 @@ class StatusBarController: PostureMonitorDelegate {
             statsMenuItem.title = "Checks: \(stats.checks)  Score: \(stats.score)%  Streak: \(stats.streak)"
             statsMenuItem.isHidden = false
         }
+    }
+}
+
+// MARK: - NSMenuDelegate (start/stop preview when menu opens/closes)
+
+extension StatusBarController: NSMenuDelegate {
+    func menuWillOpen(_ menu: NSMenu) {
+        startPreview()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        stopPreview()
     }
 }
