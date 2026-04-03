@@ -3,6 +3,7 @@ import UserNotifications
 
 protocol PostureMonitorDelegate: AnyObject {
     func postureDidChange(status: PostureStatus, stats: MonitorStats)
+    func calibrationDidUpdate(message: String)
 }
 
 struct MonitorStats {
@@ -51,33 +52,63 @@ class PostureMonitor {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
-            // Start camera and let it warm up
-            guard self.camera.start() else {
-                DispatchQueue.main.async { completion(false) }
+            // Start camera and wait for it to be running
+            let semaphore = DispatchSemaphore(value: 0)
+            self.camera.start { _ in semaphore.signal() }
+            semaphore.wait()
+
+            // Wait for camera warmup — first few frames are often black/blurry
+            DispatchQueue.main.async {
+                self.delegate?.calibrationDidUpdate(message: "Starting camera...")
+            }
+            Thread.sleep(forTimeInterval: 1.5)
+
+            // Wait for first valid frame
+            guard self.camera.waitForFrame(timeout: 5.0) != nil else {
+                NSLog("[PostureWatch] No frames received from camera")
+                DispatchQueue.main.async {
+                    self.delegate?.calibrationDidUpdate(message: "Camera not responding")
+                    completion(false)
+                }
                 return
             }
-            Thread.sleep(forTimeInterval: 1.0) // warmup
+
+            DispatchQueue.main.async {
+                self.delegate?.calibrationDidUpdate(message: "Sit up straight... detecting pose")
+            }
 
             var samples: [PoseMetrics] = []
             var attempts = 0
-            // Try up to 15 times to get 5 good samples
-            while samples.count < 5 && attempts < 15 {
-                attempts += 1
-                if let frame = self.camera.getLatestFrame(),
-                   let metrics = self.analyzer.analyze(pixelBuffer: frame) {
-                    samples.append(metrics)
-                }
-                Thread.sleep(forTimeInterval: 0.5)
-            }
 
-            // Keep camera running (for preview), don't stop here
+            while samples.count < 5 && attempts < 20 {
+                attempts += 1
+                Thread.sleep(forTimeInterval: 0.5)
+
+                guard let frame = self.camera.latestFrame else {
+                    NSLog("[PostureWatch] Calibration attempt \(attempts): no frame")
+                    continue
+                }
+
+                if let metrics = self.analyzer.analyze(pixelBuffer: frame) {
+                    samples.append(metrics)
+                    NSLog("[PostureWatch] Calibration sample \(samples.count)/5 captured")
+                    DispatchQueue.main.async {
+                        self.delegate?.calibrationDidUpdate(message: "Capturing... \(samples.count)/5")
+                    }
+                } else {
+                    NSLog("[PostureWatch] Calibration attempt \(attempts): pose not detected")
+                }
+            }
 
             DispatchQueue.main.async {
                 if samples.count >= 2 {
                     self.baseline = self.analyzer.average(samples: samples)
                     self.settingsStore.saveBaseline(self.baseline!)
+                    NSLog("[PostureWatch] Calibration succeeded with \(samples.count) samples")
                     completion(true)
                 } else {
+                    NSLog("[PostureWatch] Calibration failed: only \(samples.count) samples")
+                    self.delegate?.calibrationDidUpdate(message: "Failed — could not detect pose (\(samples.count)/2 needed)")
                     completion(false)
                 }
             }
@@ -130,8 +161,17 @@ class PostureMonitor {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self, let baseline = self.baseline else { return }
 
-            guard let frame = self.camera.captureFrame(),
+            // Start camera, get a frame, stop camera
+            let semaphore = DispatchSemaphore(value: 0)
+            self.camera.start { _ in semaphore.signal() }
+            semaphore.wait()
+
+            // Wait for a fresh frame
+            Thread.sleep(forTimeInterval: 0.3)
+
+            guard let frame = self.camera.latestFrame,
                   let metrics = self.analyzer.analyze(pixelBuffer: frame) else {
+                self.camera.stop()
                 DispatchQueue.main.async {
                     self.missCount += 1
                     if self.missCount >= 3 {
@@ -141,6 +181,8 @@ class PostureMonitor {
                 }
                 return
             }
+
+            self.camera.stop()
 
             let status = self.analyzer.compare(
                 current: metrics,

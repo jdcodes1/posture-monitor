@@ -26,14 +26,19 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
         super.init()
         monitor.delegate = self
 
-        updateIcon(.good)
+        updateIcon(nil)
         setupMenu()
 
         CameraCapture.requestAccess { [weak self] granted in
-            guard granted, let self else { return }
+            guard granted, let self else {
+                NSLog("[PostureWatch] Camera access denied")
+                return
+            }
+            NSLog("[PostureWatch] Camera access granted")
             if self.monitor.isCalibrated {
                 self.monitor.startMonitoring()
                 self.updateStatus("Monitoring — Good posture", stats: nil)
+                self.updateIcon(.good)
             } else {
                 self.startCalibration()
             }
@@ -54,11 +59,11 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
         menu.addItem(titleItem)
         menu.addItem(NSMenuItem.separator())
 
-        // Camera preview (custom view in menu item)
+        // Camera preview
         previewMenuItem = NSMenuItem()
         let previewView = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 180))
         previewView.wantsLayer = true
-        previewView.layer?.backgroundColor = NSColor.black.cgColor
+        previewView.layer?.backgroundColor = NSColor(red: 20/255, green: 24/255, blue: 32/255, alpha: 1).cgColor
         previewView.layer?.cornerRadius = 8
         previewView.layer?.masksToBounds = true
         previewMenuItem.view = previewView
@@ -121,30 +126,38 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
     // MARK: - Camera Preview
 
     private func startPreview() {
-        guard let session = monitor.camera.session ?? {
-            _ = monitor.camera.start()
-            return monitor.camera.session
-        }() else { return }
-
-        guard let view = previewMenuItem.view else { return }
-
-        if previewLayer == nil {
-            let layer = AVCaptureVideoPreviewLayer(session: session)
-            layer.videoGravity = .resizeAspectFill
-            layer.frame = view.bounds
-            // Mirror the preview horizontally
-            layer.connection?.automaticallyAdjustsVideoMirroring = false
-            layer.connection?.isVideoMirrored = true
-            view.layer?.addSublayer(layer)
-            previewLayer = layer
+        // Start camera if not running
+        monitor.camera.start { [weak self] success in
+            guard success, let self else { return }
+            self.attachPreviewLayer()
         }
+    }
+
+    private func attachPreviewLayer() {
+        guard let session = monitor.camera.captureSession,
+              let view = previewMenuItem.view,
+              previewLayer == nil else { return }
+
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        layer.frame = view.bounds
+
+        // Mirror horizontally (selfie view)
+        if let connection = layer.connection {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = true
+        }
+
+        view.layer?.addSublayer(layer)
+        previewLayer = layer
+        NSLog("[PostureWatch] Preview layer attached")
     }
 
     private func stopPreview() {
         previewLayer?.removeFromSuperlayer()
         previewLayer = nil
         // Only stop camera if not actively monitoring
-        if monitor.isPaused {
+        if monitor.isPaused || !monitor.isCalibrated {
             monitor.camera.stop()
         }
     }
@@ -213,6 +226,10 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
         updateStatus("Monitoring — \(labels[status] ?? "")", stats: stats)
     }
 
+    func calibrationDidUpdate(message: String) {
+        statusMenuItem.title = message
+    }
+
     // MARK: - UI Updates
 
     private func updateIcon(_ status: PostureStatus?) {
@@ -231,7 +248,7 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
     }
 }
 
-// MARK: - NSMenuDelegate (start/stop preview when menu opens/closes)
+// MARK: - NSMenuDelegate
 
 extension StatusBarController: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {

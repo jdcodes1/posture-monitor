@@ -1,14 +1,18 @@
 import AVFoundation
 
 class CameraCapture: NSObject {
-    private var captureSession: AVCaptureSession?
+    private(set) var captureSession: AVCaptureSession?
     private let queue = DispatchQueue(label: "com.posturewatch.camera")
-    private var latestFrame: CVPixelBuffer?
-    private var frameSemaphore = DispatchSemaphore(value: 0)
-    private var isRunning = false
+    private var _latestFrame: CVPixelBuffer?
+    private let lock = NSLock()
+    private(set) var isRunning = false
 
-    /// The capture session, for attaching a preview layer
-    var session: AVCaptureSession? { captureSession }
+    /// Thread-safe access to the latest frame
+    var latestFrame: CVPixelBuffer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return _latestFrame
+    }
 
     static func requestAccess(completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -23,56 +27,64 @@ class CameraCapture: NSObject {
         }
     }
 
-    /// Start the camera session (keeps running for preview + frame capture)
-    func start() -> Bool {
-        if isRunning { return true }
+    /// Start the camera. Can be called from any thread.
+    func start(completion: ((Bool) -> Void)? = nil) {
+        if isRunning {
+            completion?(true)
+            return
+        }
         if captureSession == nil {
-            guard setupSession() else { return false }
+            guard setupSession() else {
+                completion?(false)
+                return
+            }
         }
-        captureSession?.startRunning()
-        isRunning = true
-        return true
+        // startRunning blocks, so do it off main thread
+        queue.async { [weak self] in
+            self?.captureSession?.startRunning()
+            DispatchQueue.main.async {
+                self?.isRunning = true
+                completion?(true)
+            }
+        }
     }
 
-    /// Stop the camera session
+    /// Stop the camera.
     func stop() {
-        captureSession?.stopRunning()
-        isRunning = false
+        queue.async { [weak self] in
+            self?.captureSession?.stopRunning()
+            DispatchQueue.main.async {
+                self?.isRunning = false
+            }
+        }
     }
 
-    /// Get the most recent frame (camera must be started first)
-    func getLatestFrame() -> CVPixelBuffer? {
-        guard isRunning else { return nil }
-        // Wait briefly for a fresh frame
-        latestFrame = nil
-        let result = frameSemaphore.wait(timeout: .now() + 2.0)
-        if result == .timedOut { return nil }
-        return latestFrame
-    }
-
-    /// Capture a single frame (starts camera, grabs frame, stops camera)
-    func captureFrame() -> CVPixelBuffer? {
-        let wasRunning = isRunning
-        if !wasRunning {
-            guard start() else { return nil }
-            // Wait for camera to warm up
-            Thread.sleep(forTimeInterval: 0.3)
+    /// Wait up to `timeout` seconds for a valid frame. Camera must be started.
+    func waitForFrame(timeout: TimeInterval = 3.0) -> CVPixelBuffer? {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let frame = latestFrame {
+                return frame
+            }
+            Thread.sleep(forTimeInterval: 0.05)
         }
-
-        let frame = getLatestFrame()
-
-        if !wasRunning {
-            stop()
-        }
-        return frame
+        return nil
     }
 
     private func setupSession() -> Bool {
         let session = AVCaptureSession()
         session.sessionPreset = .medium
 
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) ?? AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device) else {
+        // Try front camera first, then any camera
+        let device: AVCaptureDevice?
+        if let front = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) {
+            device = front
+        } else {
+            device = AVCaptureDevice.default(for: .video)
+        }
+
+        guard let device, let input = try? AVCaptureDeviceInput(device: device) else {
+            NSLog("[PostureWatch] No camera device found")
             return false
         }
 
@@ -81,6 +93,7 @@ class CameraCapture: NSObject {
         output.alwaysDiscardsLateVideoFrames = true
 
         guard session.canAddInput(input), session.canAddOutput(output) else {
+            NSLog("[PostureWatch] Cannot configure capture session")
             return false
         }
 
@@ -88,6 +101,7 @@ class CameraCapture: NSObject {
         session.addOutput(output)
 
         captureSession = session
+        NSLog("[PostureWatch] Camera session configured")
         return true
     }
 }
@@ -95,7 +109,8 @@ class CameraCapture: NSObject {
 extension CameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        latestFrame = pixelBuffer
-        frameSemaphore.signal()
+        lock.lock()
+        _latestFrame = pixelBuffer
+        lock.unlock()
     }
 }
