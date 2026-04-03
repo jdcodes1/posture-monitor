@@ -39,6 +39,8 @@ export function usePostureMonitor(userId?: string | null) {
   const [isCalibrated, setIsCalibrated] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
+  // Hidden video for background checks (not in DOM but functional)
+  const bgVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const cameraRef = useRef(new CameraManager());
   const monitorRef = useRef(new MonitorState());
@@ -49,8 +51,9 @@ export function usePostureMonitor(userId?: string | null) {
   const syncRef = useRef<StatSync | null>(null);
   const syncInitRef = useRef(false);
   const lastNotifiedStatusRef = useRef<PostureStatus>('good');
+  const autoCalibrationTriggered = useRef(false);
 
-  // Sync state from MonitorState
+  // Sync state from MonitorState to React
   const syncState = useCallback(() => {
     const m = monitorRef.current;
     setStats({ ...m.stats });
@@ -62,10 +65,10 @@ export function usePostureMonitor(userId?: string | null) {
   // Single frame inference
   const detectOnce = useCallback((video: HTMLVideoElement) => {
     const lm = landmarker.current;
-    if (!lm) return null;
+    if (!lm || video.readyState < 2) return null;
     const result = lm.detect(video);
     if (!result?.landmarks?.[0]?.length) return null;
-    return result.landmarks[0] as Array<{ x: number; y: number; z: number; visibility?: number }>;
+    return result.landmarks[0] as Array<{ x: number; y: number; z: number }>;
   }, [landmarker]);
 
   // Process a single check
@@ -81,7 +84,6 @@ export function usePostureMonitor(userId?: string | null) {
       const result = compareToBaseline(metrics, m.baseline, settings.sensitivity);
       m.recordHit(result);
 
-      // Fire browser notification on transition to bad posture
       if (
         result === 'bad' &&
         lastNotifiedStatusRef.current !== 'bad' &&
@@ -96,7 +98,6 @@ export function usePostureMonitor(userId?: string | null) {
       }
       lastNotifiedStatusRef.current = result;
 
-      // Record to sync buffer if authenticated
       if (syncRef.current) {
         syncRef.current.recordCheck(result, m.stats.streak);
       }
@@ -104,7 +105,7 @@ export function usePostureMonitor(userId?: string | null) {
     syncState();
   }, [detectOnce, settings.sensitivity, settings.notificationsEnabled, syncState]);
 
-  // Foreground rAF loop
+  // Foreground rAF loop — uses the visible video element
   const startForegroundLoop = useCallback(() => {
     const loop = () => {
       if (!isMonitoringRef.current || !isForegroundRef.current) return;
@@ -124,15 +125,25 @@ export function usePostureMonitor(userId?: string | null) {
     }
   }, []);
 
-  // Background setTimeout chain
+  // Background setTimeout chain — creates a temporary hidden video
   const startBackgroundLoop = useCallback(() => {
     const tick = async () => {
       if (!isMonitoringRef.current || isForegroundRef.current) return;
       const m = monitorRef.current;
       try {
-        const video = await cameraRef.current.acquire();
-        processCheck(video);
-        cameraRef.current.release();
+        // Create a temporary hidden video for background detection
+        if (!bgVideoRef.current) {
+          bgVideoRef.current = document.createElement('video');
+          bgVideoRef.current.playsInline = true;
+          bgVideoRef.current.muted = true;
+        }
+        const bgVideo = bgVideoRef.current;
+        const bgCam = new CameraManager();
+        await bgCam.start(bgVideo);
+        // Wait for a usable frame
+        await new Promise((r) => setTimeout(r, 300));
+        processCheck(bgVideo);
+        bgCam.stop(bgVideo);
       } catch {
         m.recordMiss();
         syncState();
@@ -155,7 +166,6 @@ export function usePostureMonitor(userId?: string | null) {
   }, []);
 
   // Set ready once MediaPipe loads
-  const autoCalibrationTriggered = useRef(false);
   useEffect(() => {
     if (!mpLoading && !mpError) {
       setStatus('ready');
@@ -204,21 +214,16 @@ export function usePostureMonitor(userId?: string | null) {
 
       if (visible) {
         stopBackgroundLoop();
-        // Acquire camera and attach to video element for live preview
-        cameraRef.current.acquire().then((video) => {
-          if (videoRef.current) {
-            videoRef.current.srcObject = video.srcObject;
-            videoRef.current.play().catch(() => {});
-          }
-          startForegroundLoop();
-        }).catch(() => {});
+        // Re-start camera on the visible video element
+        const video = videoRef.current;
+        if (video) {
+          cameraRef.current.start(video).then(() => {
+            startForegroundLoop();
+          }).catch(() => {});
+        }
       } else {
         stopForegroundLoop();
-        // Release camera for background mode
-        if (videoRef.current) {
-          videoRef.current.srcObject = null;
-        }
-        cameraRef.current.release();
+        cameraRef.current.stop(videoRef.current ?? undefined);
         startBackgroundLoop();
       }
     };
@@ -232,20 +237,19 @@ export function usePostureMonitor(userId?: string | null) {
     return () => {
       stopForegroundLoop();
       stopBackgroundLoop();
-      cameraRef.current.release();
+      cameraRef.current.stop(videoRef.current ?? undefined);
     };
   }, [stopForegroundLoop, stopBackgroundLoop]);
 
-  // Calibrate
+  // Calibrate — starts camera on the visible video, takes 5 samples, auto-starts monitoring
   const calibrate = useCallback(async () => {
     setStatus('calibrating');
     setError(null);
     try {
-      const video = await cameraRef.current.acquire();
-      if (videoRef.current) {
-        videoRef.current.srcObject = video.srcObject;
-        await videoRef.current.play().catch(() => {});
-      }
+      const video = videoRef.current;
+      if (!video) throw new Error('Video element not ready');
+
+      await cameraRef.current.start(video);
 
       // Wait for camera to produce real frames
       await new Promise<void>((resolve) => {
@@ -256,7 +260,7 @@ export function usePostureMonitor(userId?: string | null) {
         check();
       });
       // Extra settle time for camera exposure/focus
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 800));
 
       const samples: PoseMetrics[] = [];
       let consecutiveMisses = 0;
@@ -265,12 +269,11 @@ export function usePostureMonitor(userId?: string | null) {
         const landmarks = detectOnce(video);
         if (!landmarks || landmarks.length === 0) {
           consecutiveMisses++;
-          // Retry this sample up to 3 times before giving up
-          if (consecutiveMisses >= 3) {
+          if (consecutiveMisses >= 5) {
             throw new Error('Could not detect pose. Make sure your upper body is visible in the camera.');
           }
-          i--; // retry this sample
-          await new Promise((r) => setTimeout(r, 300));
+          i--;
+          await new Promise((r) => setTimeout(r, 400));
           continue;
         }
         consecutiveMisses = 0;
@@ -281,46 +284,30 @@ export function usePostureMonitor(userId?: string | null) {
       monitorRef.current.calibrate(baseline);
       saveBaseline(baseline);
       setIsCalibrated(true);
-      // Auto-start monitoring after successful calibration
-      setTimeout(() => {
-        monitorRef.current.start();
-        isMonitoringRef.current = true;
-        setStatus('monitoring');
-        syncState();
-        if (isForegroundRef.current) {
-          cameraRef.current.acquire().then((v) => {
-            if (videoRef.current) {
-              videoRef.current.srcObject = v.srcObject;
-              videoRef.current.play().catch(() => {});
-            }
-            startForegroundLoop();
-          }).catch(() => {});
-        } else {
-          cameraRef.current.release();
-          startBackgroundLoop();
-        }
-      }, 100);
+
+      // Auto-start monitoring — camera is already running on videoRef
+      monitorRef.current.start();
+      isMonitoringRef.current = true;
+      setStatus('monitoring');
+      syncState();
+      startForegroundLoop();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Calibration failed');
       setStatus('ready');
-      // Release camera on failure
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-      cameraRef.current.release();
+      cameraRef.current.stop(videoRef.current ?? undefined);
     }
-  }, [detectOnce]);
+  }, [detectOnce, syncState, startForegroundLoop]);
 
   // Auto-calibrate when model is ready and no saved baseline
   useEffect(() => {
     if (status === 'ready' && !autoCalibrationTriggered.current && !isCalibrated) {
       autoCalibrationTriggered.current = true;
-      setTimeout(() => calibrate(), 500);
+      setTimeout(() => calibrate(), 300);
     }
   }, [status, isCalibrated, calibrate]);
 
-  // Start monitoring
-  const startMonitoring = useCallback(() => {
+  // Start monitoring (used when user has a saved baseline)
+  const startMonitoring = useCallback(async () => {
     const m = monitorRef.current;
     if (!m.baseline) return;
     m.start();
@@ -329,16 +316,12 @@ export function usePostureMonitor(userId?: string | null) {
     syncState();
 
     if (isForegroundRef.current) {
-      // Camera already acquired from calibration, start loop
-      cameraRef.current.acquire().then((video) => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = video.srcObject;
-          videoRef.current.play().catch(() => {});
-        }
+      const video = videoRef.current;
+      if (video) {
+        await cameraRef.current.start(video);
         startForegroundLoop();
-      }).catch(() => {});
+      }
     } else {
-      cameraRef.current.release();
       startBackgroundLoop();
     }
   }, [syncState, startForegroundLoop, startBackgroundLoop]);
@@ -349,10 +332,7 @@ export function usePostureMonitor(userId?: string | null) {
     monitorRef.current.stop();
     stopForegroundLoop();
     stopBackgroundLoop();
-    if (videoRef.current) {
-      videoRef.current.srcObject = null;
-    }
-    cameraRef.current.release();
+    cameraRef.current.stop(videoRef.current ?? undefined);
     setStatus('ready');
     updateFavicon('away');
   }, [stopForegroundLoop, stopBackgroundLoop]);

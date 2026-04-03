@@ -1,37 +1,36 @@
 export class CameraManager {
   private stream: MediaStream | null = null;
-  private video: HTMLVideoElement | null = null;
 
-  async acquire(): Promise<HTMLVideoElement> {
-    if (this.stream && this.video) return this.video;
+  async start(video: HTMLVideoElement): Promise<void> {
+    if (this.stream) return;
 
     this.stream = await navigator.mediaDevices.getUserMedia({
       video: { width: 640, height: 480, facingMode: 'user' },
     });
 
-    this.video = document.createElement('video');
-    this.video.srcObject = this.stream;
-    this.video.playsInline = true;
-    this.video.muted = true;
-    await this.video.play();
+    video.srcObject = this.stream;
+    video.playsInline = true;
+    video.muted = true;
+    await video.play();
 
     // Wait for video to have dimensions
     await new Promise<void>((resolve) => {
-      if (this.video!.videoWidth > 0) return resolve();
-      this.video!.addEventListener('loadeddata', () => resolve(), { once: true });
+      if (video.videoWidth > 0) return resolve();
+      video.addEventListener('loadeddata', () => resolve(), { once: true });
     });
-
-    return this.video;
   }
 
-  release(): void {
+  stop(video?: HTMLVideoElement): void {
     if (this.stream) {
       this.stream.getTracks().forEach((t) => t.stop());
       this.stream = null;
     }
-    if (this.video) {
-      this.video.srcObject = null;
-      this.video = null;
+    if (video) {
+      video.srcObject = null;
     }
+  }
+
+  isActive(): boolean {
+    return this.stream !== null;
   }
 }
