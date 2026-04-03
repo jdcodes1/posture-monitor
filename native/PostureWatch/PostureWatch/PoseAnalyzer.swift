@@ -11,9 +11,27 @@ struct PoseMetrics {
     let noseShoulderDist: CGFloat
 }
 
+/// Detected landmark positions in normalized coordinates (0-1, origin bottom-left)
+struct PoseLandmarks {
+    let nose: CGPoint
+    let leftEar: CGPoint
+    let rightEar: CGPoint
+    let leftShoulder: CGPoint
+    let rightShoulder: CGPoint
+    let leftElbow: CGPoint?
+    let rightElbow: CGPoint?
+    let leftHip: CGPoint?
+    let rightHip: CGPoint?
+}
+
+struct PoseAnalysisResult {
+    let metrics: PoseMetrics
+    let landmarks: PoseLandmarks
+}
+
 class PoseAnalyzer {
 
-    func analyze(pixelBuffer: CVPixelBuffer) -> PoseMetrics? {
+    func analyze(pixelBuffer: CVPixelBuffer) -> PoseAnalysisResult? {
         let request = VNDetectHumanBodyPoseRequest()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
 
@@ -43,12 +61,32 @@ class PoseAnalyzer {
             let earMidY = (leftEar.location.y + rightEar.location.y) / 2
             let shoulderMidY = (leftShoulder.location.y + rightShoulder.location.y) / 2
 
-            return PoseMetrics(
+            let metrics = PoseMetrics(
                 earShoulderDist: shoulderMidY - earMidY,
                 headHeight: nose.location.y,
                 shoulderTilt: abs(leftShoulder.location.y - rightShoulder.location.y),
                 noseShoulderDist: shoulderMidY - nose.location.y
             )
+
+            // Optional landmarks for visualization
+            let leftElbow = try? observation.recognizedPoint(.leftElbow)
+            let rightElbow = try? observation.recognizedPoint(.rightElbow)
+            let leftHip = try? observation.recognizedPoint(.leftHip)
+            let rightHip = try? observation.recognizedPoint(.rightHip)
+
+            let landmarks = PoseLandmarks(
+                nose: nose.location,
+                leftEar: leftEar.location,
+                rightEar: rightEar.location,
+                leftShoulder: leftShoulder.location,
+                rightShoulder: rightShoulder.location,
+                leftElbow: leftElbow?.confidence ?? 0 > minConfidence ? leftElbow?.location : nil,
+                rightElbow: rightElbow?.confidence ?? 0 > minConfidence ? rightElbow?.location : nil,
+                leftHip: leftHip?.confidence ?? 0 > minConfidence ? leftHip?.location : nil,
+                rightHip: rightHip?.confidence ?? 0 > minConfidence ? rightHip?.location : nil
+            )
+
+            return PoseAnalysisResult(metrics: metrics, landmarks: landmarks)
         } catch {
             return nil
         }

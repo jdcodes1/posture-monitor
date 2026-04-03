@@ -89,8 +89,8 @@ class PostureMonitor {
                     continue
                 }
 
-                if let metrics = self.analyzer.analyze(pixelBuffer: frame) {
-                    samples.append(metrics)
+                if let result = self.analyzer.analyze(pixelBuffer: frame) {
+                    samples.append(result.metrics)
                     NSLog("[PostureWatch] Calibration sample \(samples.count)/5 captured")
                     DispatchQueue.main.async {
                         self.delegate?.calibrationDidUpdate(message: "Capturing... \(samples.count)/5")
@@ -170,7 +170,7 @@ class PostureMonitor {
             Thread.sleep(forTimeInterval: 0.3)
 
             guard let frame = self.camera.latestFrame,
-                  let metrics = self.analyzer.analyze(pixelBuffer: frame) else {
+                  let result = self.analyzer.analyze(pixelBuffer: frame) else {
                 self.camera.stop()
                 DispatchQueue.main.async {
                     self.missCount += 1
@@ -185,7 +185,7 @@ class PostureMonitor {
             self.camera.stop()
 
             let status = self.analyzer.compare(
-                current: metrics,
+                current: result.metrics,
                 baseline: baseline,
                 sensitivity: CGFloat(self.settings.sensitivity)
             )

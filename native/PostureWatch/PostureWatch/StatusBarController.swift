@@ -8,11 +8,12 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
     private var statusMenuItem: NSMenuItem!
     private var statsMenuItem: NSMenuItem!
     private var pauseMenuItem: NSMenuItem!
-    private var calibrateMenuItem: NSMenuItem!
     private var previewMenuItem: NSMenuItem!
     private var sensitivityMenu: NSMenu!
     private var intervalMenu: NSMenu!
     private var previewLayer: AVCaptureVideoPreviewLayer?
+    private var overlayView: PoseOverlayView?
+    private var liveDetectionTimer: Timer?
 
     private let colors: [PostureStatus: NSColor] = [
         .good: NSColor(red: 62/255, green: 232/255, blue: 165/255, alpha: 1),
@@ -59,14 +60,20 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
         menu.addItem(titleItem)
         menu.addItem(NSMenuItem.separator())
 
-        // Camera preview
+        // Camera preview + pose overlay
         previewMenuItem = NSMenuItem()
-        let previewView = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 180))
-        previewView.wantsLayer = true
-        previewView.layer?.backgroundColor = NSColor(red: 20/255, green: 24/255, blue: 32/255, alpha: 1).cgColor
-        previewView.layer?.cornerRadius = 8
-        previewView.layer?.masksToBounds = true
-        previewMenuItem.view = previewView
+        let previewContainer = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 180))
+        previewContainer.wantsLayer = true
+        previewContainer.layer?.backgroundColor = NSColor(red: 20/255, green: 24/255, blue: 32/255, alpha: 1).cgColor
+        previewContainer.layer?.cornerRadius = 8
+        previewContainer.layer?.masksToBounds = true
+
+        let overlay = PoseOverlayView(frame: previewContainer.bounds)
+        overlay.autoresizingMask = [.width, .height]
+        previewContainer.addSubview(overlay)
+        overlayView = overlay
+
+        previewMenuItem.view = previewContainer
         menu.addItem(previewMenuItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -108,13 +115,18 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        calibrateMenuItem = NSMenuItem(title: "Recalibrate", action: #selector(recalibrate), keyEquivalent: "r")
-        calibrateMenuItem.target = self
-        menu.addItem(calibrateMenuItem)
+        // Recalibrate — custom view so menu stays open
+        let calibrateItem = NSMenuItem()
+        let calibrateButton = makeMenuButton(title: "Recalibrate", action: #selector(recalibrate))
+        calibrateItem.view = calibrateButton
+        menu.addItem(calibrateItem)
 
-        pauseMenuItem = NSMenuItem(title: "Pause", action: #selector(togglePause), keyEquivalent: "p")
-        pauseMenuItem.target = self
-        menu.addItem(pauseMenuItem)
+        // Pause — custom view so menu stays open
+        let pauseItem = NSMenuItem()
+        let pauseButton = makeMenuButton(title: "Pause", action: #selector(togglePause))
+        pauseMenuItem = pauseItem
+        pauseItem.view = pauseButton
+        menu.addItem(pauseItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -123,13 +135,28 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
         statusItem.menu = menu
     }
 
-    // MARK: - Camera Preview
+    /// Create a clickable button that lives in a menu item (doesn't close menu on click)
+    private func makeMenuButton(title: String, action: Selector) -> NSView {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 28))
+        let button = NSButton(frame: NSRect(x: 16, y: 2, width: 208, height: 24))
+        button.title = title
+        button.bezelStyle = .inline
+        button.target = self
+        button.action = action
+        button.font = NSFont.systemFont(ofSize: 13)
+        container.addSubview(button)
+        return container
+    }
+
+    // MARK: - Camera Preview + Live Detection
 
     private func startPreview() {
-        // Start camera if not running
         monitor.camera.start { [weak self] success in
             guard success, let self else { return }
-            self.attachPreviewLayer()
+            DispatchQueue.main.async {
+                self.attachPreviewLayer()
+                self.startLiveDetection()
+            }
         }
     }
 
@@ -142,21 +169,42 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
         layer.videoGravity = .resizeAspectFill
         layer.frame = view.bounds
 
-        // Mirror horizontally (selfie view)
         if let connection = layer.connection {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = true
         }
 
-        view.layer?.addSublayer(layer)
+        // Insert preview below overlay view
+        view.layer?.insertSublayer(layer, at: 0)
         previewLayer = layer
-        NSLog("[PostureWatch] Preview layer attached")
+    }
+
+    private func startLiveDetection() {
+        liveDetectionTimer?.invalidate()
+        liveDetectionTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
+            self?.runLiveDetection()
+        }
+    }
+
+    private func runLiveDetection() {
+        guard let frame = monitor.camera.latestFrame else { return }
+        DispatchQueue.global(qos: .userInteractive).async { [weak self] in
+            guard let self, let result = self.monitor.analyzer.analyze(pixelBuffer: frame) else {
+                DispatchQueue.main.async { self?.overlayView?.landmarks = nil }
+                return
+            }
+            DispatchQueue.main.async {
+                self.overlayView?.landmarks = result.landmarks
+            }
+        }
     }
 
     private func stopPreview() {
+        liveDetectionTimer?.invalidate()
+        liveDetectionTimer = nil
         previewLayer?.removeFromSuperlayer()
         previewLayer = nil
-        // Only stop camera if not actively monitoring
+        overlayView?.landmarks = nil
         if monitor.isPaused || !monitor.isCalibrated {
             monitor.camera.stop()
         }
@@ -187,11 +235,15 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
     @objc private func togglePause() {
         monitor.togglePause()
         if monitor.isPaused {
-            pauseMenuItem.title = "Resume"
+            if let button = pauseMenuItem.view?.subviews.first as? NSButton {
+                button.title = "Resume"
+            }
             updateIcon(nil)
             statusMenuItem.title = "Paused"
         } else {
-            pauseMenuItem.title = "Pause"
+            if let button = pauseMenuItem.view?.subviews.first as? NSButton {
+                button.title = "Pause"
+            }
         }
     }
 
@@ -224,6 +276,7 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
 
         updateIcon(status)
         updateStatus("Monitoring — \(labels[status] ?? "")", stats: stats)
+        overlayView?.postureStatus = status
     }
 
     func calibrationDidUpdate(message: String) {
