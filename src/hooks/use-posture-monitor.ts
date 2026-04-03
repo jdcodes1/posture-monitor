@@ -18,12 +18,13 @@ import {
   saveSettings as persistSettings,
   type Settings,
 } from '@/lib/local-storage';
+import { StatSync } from '@/lib/sync';
 import { useMediaPipe } from './use-mediapipe';
 import { useBattery } from './use-battery';
 
 type MonitorStatus = 'loading' | 'ready' | 'calibrating' | 'monitoring';
 
-export function usePostureMonitor() {
+export function usePostureMonitor(userId?: string | null) {
   const { landmarker, loading: mpLoading, error: mpError } = useMediaPipe();
   const { isLowBattery } = useBattery();
 
@@ -46,6 +47,8 @@ export function usePostureMonitor() {
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isForegroundRef = useRef(true);
   const isMonitoringRef = useRef(false);
+  const syncRef = useRef<StatSync | null>(null);
+  const syncInitRef = useRef(false);
 
   // Sync state from MonitorState
   const syncState = useCallback(() => {
@@ -77,6 +80,10 @@ export function usePostureMonitor() {
       const metrics = extractMetrics(landmarks);
       const result = compareToBaseline(metrics, m.baseline, settings.sensitivity);
       m.recordHit(result);
+      // Record to sync buffer if authenticated
+      if (syncRef.current) {
+        syncRef.current.recordCheck(result, m.stats.streak);
+      }
     }
     syncState();
   }, [detectOnce, settings.sensitivity, syncState]);
@@ -149,6 +156,26 @@ export function usePostureMonitor() {
       setIsCalibrated(true);
     }
   }, []);
+
+  // Initialize sync for authenticated users
+  useEffect(() => {
+    if (!userId || syncInitRef.current) return;
+    syncInitRef.current = true;
+
+    const sync = new StatSync();
+    syncRef.current = sync;
+    sync.start(userId).then(() => {
+      sync.migrateLocalStorage();
+    }).catch((e) => {
+      console.error('Sync start failed:', e);
+    });
+
+    return () => {
+      sync.stop();
+      syncRef.current = null;
+      syncInitRef.current = false;
+    };
+  }, [userId]);
 
   // Visibility change handler
   useEffect(() => {
