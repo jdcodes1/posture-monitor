@@ -247,13 +247,33 @@ export function usePostureMonitor(userId?: string | null) {
         await videoRef.current.play().catch(() => {});
       }
 
+      // Wait for camera to produce real frames
+      await new Promise<void>((resolve) => {
+        const check = () => {
+          if (video.readyState >= 2 && video.videoWidth > 0) return resolve();
+          setTimeout(check, 100);
+        };
+        check();
+      });
+      // Extra settle time for camera exposure/focus
+      await new Promise((r) => setTimeout(r, 500));
+
       const samples: PoseMetrics[] = [];
+      let consecutiveMisses = 0;
       for (let i = 0; i < 5; i++) {
         if (i > 0) await new Promise((r) => setTimeout(r, 600));
         const landmarks = detectOnce(video);
         if (!landmarks || landmarks.length === 0) {
-          throw new Error('Could not detect pose. Make sure you are visible in the camera.');
+          consecutiveMisses++;
+          // Retry this sample up to 3 times before giving up
+          if (consecutiveMisses >= 3) {
+            throw new Error('Could not detect pose. Make sure your upper body is visible in the camera.');
+          }
+          i--; // retry this sample
+          await new Promise((r) => setTimeout(r, 300));
+          continue;
         }
+        consecutiveMisses = 0;
         samples.push(extractMetrics(landmarks));
       }
 
