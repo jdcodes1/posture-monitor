@@ -49,6 +49,7 @@ export function usePostureMonitor(userId?: string | null) {
   const isMonitoringRef = useRef(false);
   const syncRef = useRef<StatSync | null>(null);
   const syncInitRef = useRef(false);
+  const lastNotifiedStatusRef = useRef<PostureStatus>('good');
 
   // Sync state from MonitorState
   const syncState = useCallback(() => {
@@ -80,6 +81,22 @@ export function usePostureMonitor(userId?: string | null) {
       const metrics = extractMetrics(landmarks);
       const result = compareToBaseline(metrics, m.baseline, settings.sensitivity);
       m.recordHit(result);
+
+      // Fire browser notification on transition to bad posture
+      if (
+        result === 'bad' &&
+        lastNotifiedStatusRef.current !== 'bad' &&
+        settings.notificationsEnabled &&
+        typeof Notification !== 'undefined' &&
+        Notification.permission === 'granted'
+      ) {
+        new Notification('posture//watch', {
+          body: 'Sit up straight! Your posture needs attention.',
+          silent: false,
+        });
+      }
+      lastNotifiedStatusRef.current = result;
+
       // Record to sync buffer if authenticated
       if (syncRef.current) {
         syncRef.current.recordCheck(result, m.stats.streak);
