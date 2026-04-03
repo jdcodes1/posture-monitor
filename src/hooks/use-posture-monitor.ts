@@ -39,8 +39,10 @@ export function usePostureMonitor(userId?: string | null) {
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const bgVideoRef = useRef<HTMLVideoElement | null>(null);
+  // Visible video element for camera preview (lives in the page, not in child components)
+  const displayVideoRef = useRef<HTMLVideoElement>(null);
+  // Hidden video element for MediaPipe detection (created once, never in DOM)
+  const detectionVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const cameraRef = useRef(new CameraManager());
   const monitorRef = useRef(new MonitorState());
@@ -52,7 +54,36 @@ export function usePostureMonitor(userId?: string | null) {
   const syncInitRef = useRef(false);
   const lastNotifiedStatusRef = useRef<PostureStatus>('good');
   const autoCalibrationTriggered = useRef(false);
-  const cameraStartedRef = useRef(false);
+
+  // Attach a stream to both the display and detection videos
+  const attachStream = useCallback((stream: MediaStream) => {
+    // Display video (visible, mirrored via CSS)
+    if (displayVideoRef.current) {
+      displayVideoRef.current.srcObject = stream;
+      displayVideoRef.current.play().catch(() => {});
+    }
+    // Detection video (hidden, used by MediaPipe)
+    if (!detectionVideoRef.current) {
+      detectionVideoRef.current = document.createElement('video');
+      detectionVideoRef.current.playsInline = true;
+      detectionVideoRef.current.muted = true;
+      // Give it real dimensions so MediaPipe can read it
+      detectionVideoRef.current.width = 640;
+      detectionVideoRef.current.height = 480;
+    }
+    detectionVideoRef.current.srcObject = stream;
+    detectionVideoRef.current.play().catch(() => {});
+  }, []);
+
+  // Detach streams from both videos
+  const detachStream = useCallback(() => {
+    if (displayVideoRef.current) {
+      displayVideoRef.current.srcObject = null;
+    }
+    if (detectionVideoRef.current) {
+      detectionVideoRef.current.srcObject = null;
+    }
+  }, []);
 
   // Sync state from MonitorState to React
   const syncState = useCallback(() => {
@@ -63,21 +94,26 @@ export function usePostureMonitor(userId?: string | null) {
     updateFavicon(m.isAway ? 'away' : m.postureStatus);
   }, []);
 
-  // Single frame inference
-  const detectOnce = useCallback((video: HTMLVideoElement) => {
+  // Single frame inference — always uses the hidden detection video
+  const detectOnce = useCallback(() => {
     const lm = landmarker.current;
-    if (!lm || video.readyState < 2) return null;
-    const result = lm.detect(video);
-    if (!result?.landmarks?.[0]?.length) return null;
-    return result.landmarks[0] as Array<{ x: number; y: number; z: number }>;
+    const video = detectionVideoRef.current;
+    if (!lm || !video || video.readyState < 2) return null;
+    try {
+      const result = lm.detect(video);
+      if (!result?.landmarks?.[0]?.length) return null;
+      return result.landmarks[0] as Array<{ x: number; y: number; z: number }>;
+    } catch {
+      return null;
+    }
   }, [landmarker]);
 
   // Process a single check
-  const processCheck = useCallback((video: HTMLVideoElement) => {
+  const processCheck = useCallback(() => {
     const m = monitorRef.current;
     if (!m.baseline) return;
 
-    const landmarks = detectOnce(video);
+    const landmarks = detectOnce();
     if (!landmarks || landmarks.length === 0) {
       m.recordMiss();
     } else {
@@ -110,10 +146,7 @@ export function usePostureMonitor(userId?: string | null) {
   const startForegroundLoop = useCallback(() => {
     const loop = () => {
       if (!isMonitoringRef.current || !isForegroundRef.current) return;
-      const video = videoRef.current;
-      if (video && video.readyState >= 2) {
-        processCheck(video);
-      }
+      processCheck();
       rafRef.current = requestAnimationFrame(loop);
     };
     rafRef.current = requestAnimationFrame(loop);
@@ -132,17 +165,22 @@ export function usePostureMonitor(userId?: string | null) {
       if (!isMonitoringRef.current || isForegroundRef.current) return;
       const m = monitorRef.current;
       try {
-        if (!bgVideoRef.current) {
-          bgVideoRef.current = document.createElement('video');
-          bgVideoRef.current.playsInline = true;
-          bgVideoRef.current.muted = true;
-        }
-        const bgVideo = bgVideoRef.current;
-        const bgCam = new CameraManager();
-        await bgCam.start(bgVideo);
-        await new Promise((r) => setTimeout(r, 300));
-        processCheck(bgVideo);
-        bgCam.stop(bgVideo);
+        // Acquire camera, attach to detection video, run one check, release
+        const stream = await cameraRef.current.acquire();
+        attachStream(stream);
+        // Wait for detection video to have a frame
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            const v = detectionVideoRef.current;
+            if (v && v.readyState >= 2) return resolve();
+            setTimeout(check, 50);
+          };
+          check();
+        });
+        await new Promise((r) => setTimeout(r, 200));
+        processCheck();
+        detachStream();
+        cameraRef.current.release();
       } catch {
         m.recordMiss();
         syncState();
@@ -155,7 +193,7 @@ export function usePostureMonitor(userId?: string | null) {
     const m = monitorRef.current;
     const interval = m.getEffectiveInterval(settings.interval * 1000, isLowBattery);
     timeoutRef.current = setTimeout(tick, interval);
-  }, [processCheck, settings.interval, isLowBattery, syncState]);
+  }, [processCheck, attachStream, detachStream, settings.interval, isLowBattery, syncState]);
 
   const stopBackgroundLoop = useCallback(() => {
     if (timeoutRef.current) {
@@ -164,7 +202,7 @@ export function usePostureMonitor(userId?: string | null) {
     }
   }, []);
 
-  // Start camera immediately when status becomes 'ready' and video ref is available
+  // MediaPipe loaded → set status to ready
   useEffect(() => {
     if (!mpLoading && !mpError) {
       setStatus('ready');
@@ -174,27 +212,46 @@ export function usePostureMonitor(userId?: string | null) {
     }
   }, [mpLoading, mpError]);
 
-  // Start camera as soon as we're ready — poll for videoRef since it mounts async
+  // Start camera as soon as we're ready — poll for displayVideoRef
   useEffect(() => {
     if (status !== 'ready' && status !== 'calibrating') return;
-    if (cameraStartedRef.current) return;
+    if (cameraReady) return;
 
-    const tryStartCamera = () => {
-      const video = videoRef.current;
-      if (!video) {
-        // Video element not mounted yet, retry
-        setTimeout(tryStartCamera, 100);
-        return;
+    let cancelled = false;
+
+    const tryStart = async () => {
+      // Poll until the display video element is mounted
+      while (!displayVideoRef.current && !cancelled) {
+        await new Promise((r) => setTimeout(r, 50));
       }
-      cameraStartedRef.current = true;
-      cameraRef.current.start(video).then(() => {
-        setCameraReady(true);
-      }).catch((e) => {
-        setError(e instanceof Error ? e.message : 'Camera access denied');
-      });
+      if (cancelled) return;
+
+      try {
+        const stream = await cameraRef.current.acquire();
+        if (cancelled) return;
+        attachStream(stream);
+
+        // Wait for detection video to have a real frame
+        await new Promise<void>((resolve) => {
+          const check = () => {
+            const v = detectionVideoRef.current;
+            if (v && v.readyState >= 2 && v.videoWidth > 0) return resolve();
+            setTimeout(check, 50);
+          };
+          check();
+        });
+
+        if (!cancelled) setCameraReady(true);
+      } catch (e) {
+        if (!cancelled) {
+          setError(e instanceof Error ? e.message : 'Camera access denied');
+        }
+      }
     };
-    tryStartCamera();
-  }, [status]);
+
+    tryStart();
+    return () => { cancelled = true; };
+  }, [status, cameraReady, attachStream]);
 
   // Load saved baseline on mount
   useEffect(() => {
@@ -235,57 +292,52 @@ export function usePostureMonitor(userId?: string | null) {
 
       if (visible) {
         stopBackgroundLoop();
-        const video = videoRef.current;
-        if (video) {
-          cameraRef.current.start(video).then(() => {
-            startForegroundLoop();
-          }).catch(() => {});
-        }
+        cameraRef.current.acquire().then((stream) => {
+          attachStream(stream);
+          startForegroundLoop();
+        }).catch(() => {});
       } else {
         stopForegroundLoop();
-        cameraRef.current.stop(videoRef.current ?? undefined);
+        detachStream();
+        cameraRef.current.release();
         startBackgroundLoop();
       }
     };
 
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [startForegroundLoop, stopForegroundLoop, startBackgroundLoop, stopBackgroundLoop]);
+  }, [startForegroundLoop, stopForegroundLoop, startBackgroundLoop, stopBackgroundLoop, attachStream, detachStream]);
 
   // Cleanup on unmount
   useEffect(() => {
     return () => {
       stopForegroundLoop();
       stopBackgroundLoop();
-      cameraRef.current.stop(videoRef.current ?? undefined);
+      detachStream();
+      cameraRef.current.release();
     };
-  }, [stopForegroundLoop, stopBackgroundLoop]);
+  }, [stopForegroundLoop, stopBackgroundLoop, detachStream]);
 
-  // Calibrate — camera is already running, just take samples
+  // Calibrate — camera and detection video are already running
   const calibrate = useCallback(async () => {
     setStatus('calibrating');
     setError(null);
     try {
-      const video = videoRef.current;
-      if (!video || video.readyState < 2) {
-        throw new Error('Camera not ready yet. Please wait a moment and try again.');
-      }
-
-      // Extra settle time for first calibration
+      // Wait a moment for camera to settle
       await new Promise((r) => setTimeout(r, 500));
 
       const samples: PoseMetrics[] = [];
       let consecutiveMisses = 0;
       for (let i = 0; i < 5; i++) {
         if (i > 0) await new Promise((r) => setTimeout(r, 600));
-        const landmarks = detectOnce(video);
+        const landmarks = detectOnce();
         if (!landmarks || landmarks.length === 0) {
           consecutiveMisses++;
-          if (consecutiveMisses >= 5) {
+          if (consecutiveMisses >= 8) {
             throw new Error('Could not detect pose. Make sure your upper body is visible in the camera.');
           }
           i--;
-          await new Promise((r) => setTimeout(r, 400));
+          await new Promise((r) => setTimeout(r, 500));
           continue;
         }
         consecutiveMisses = 0;
@@ -313,8 +365,7 @@ export function usePostureMonitor(userId?: string | null) {
   useEffect(() => {
     if (cameraReady && !autoCalibrationTriggered.current && !isCalibrated && landmarker.current) {
       autoCalibrationTriggered.current = true;
-      // Give camera a full second to warm up before auto-calibrating
-      setTimeout(() => calibrate(), 1000);
+      setTimeout(() => calibrate(), 1500);
     }
   }, [cameraReady, isCalibrated, calibrate, landmarker]);
 
@@ -328,15 +379,13 @@ export function usePostureMonitor(userId?: string | null) {
     syncState();
 
     if (isForegroundRef.current) {
-      const video = videoRef.current;
-      if (video) {
-        await cameraRef.current.start(video);
-        startForegroundLoop();
-      }
+      const stream = await cameraRef.current.acquire();
+      attachStream(stream);
+      startForegroundLoop();
     } else {
       startBackgroundLoop();
     }
-  }, [syncState, startForegroundLoop, startBackgroundLoop]);
+  }, [syncState, startForegroundLoop, startBackgroundLoop, attachStream]);
 
   // Stop monitoring
   const stopMonitoring = useCallback(() => {
@@ -344,21 +393,22 @@ export function usePostureMonitor(userId?: string | null) {
     monitorRef.current.stop();
     stopForegroundLoop();
     stopBackgroundLoop();
-    cameraRef.current.stop(videoRef.current ?? undefined);
+    detachStream();
+    cameraRef.current.release();
     setStatus('ready');
     updateFavicon('away');
-  }, [stopForegroundLoop, stopBackgroundLoop]);
+    setCameraReady(false);
+  }, [stopForegroundLoop, stopBackgroundLoop, detachStream]);
 
   // Recalibrate
-  const recalibrate = useCallback(() => {
+  const recalibrate = useCallback(async () => {
     stopMonitoring();
-    // Restart camera for calibration view
-    const video = videoRef.current;
-    if (video) {
-      cameraRef.current.start(video).catch(() => {});
-    }
+    // Restart camera
+    const stream = await cameraRef.current.acquire();
+    attachStream(stream);
+    setCameraReady(true);
     calibrate();
-  }, [stopMonitoring, calibrate]);
+  }, [stopMonitoring, calibrate, attachStream]);
 
   // Update settings
   const updateSettings = useCallback((partial: Partial<Settings>) => {
@@ -377,7 +427,7 @@ export function usePostureMonitor(userId?: string | null) {
     settings,
     error,
     isCalibrated,
-    videoRef,
+    displayVideoRef,
     calibrate,
     startMonitoring,
     stopMonitoring,

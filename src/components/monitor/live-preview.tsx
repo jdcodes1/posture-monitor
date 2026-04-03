@@ -1,11 +1,9 @@
 'use client';
 
-import { type RefObject } from 'react';
 import type { PostureStatus } from '@/lib/pose-engine';
 import type { SessionStats } from '@/lib/monitor-controller';
 
 interface LivePreviewProps {
-  videoRef: RefObject<HTMLVideoElement | null>;
   postureStatus: PostureStatus | 'away';
   stats: SessionStats;
   score: number;
@@ -28,7 +26,6 @@ const STATUS_LABELS: Record<PostureStatus | 'away', string> = {
 };
 
 export function LivePreview({
-  videoRef,
   postureStatus,
   stats,
   score,
@@ -39,16 +36,6 @@ export function LivePreview({
 
   return (
     <div className="flex flex-col items-center gap-6 w-full max-w-md mx-auto">
-      <div className="relative w-full aspect-[4/3] rounded-lg overflow-hidden bg-[#141820] border border-[#252b38]">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="w-full h-full object-cover scale-x-[-1]"
-        />
-      </div>
-
       {/* Status indicator */}
       <div className="flex items-center gap-3">
         <span

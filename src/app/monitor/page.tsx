@@ -13,7 +13,7 @@ export default function MonitorPage() {
     settings,
     error,
     isCalibrated,
-    videoRef,
+    displayVideoRef,
     calibrate,
     startMonitoring,
     stopMonitoring,
@@ -28,16 +28,36 @@ export default function MonitorPage() {
           posture//watch
         </h1>
 
+        {/* Persistent video element — never unmounted between views */}
+        <div className="relative w-full aspect-[4/3] rounded-lg overflow-hidden bg-[#141820] border border-[#252b38] mb-6">
+          <video
+            ref={displayVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover scale-x-[-1]"
+          />
+          {status === 'loading' && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+              <div className="w-6 h-6 border-2 border-[#4a9eff] border-t-transparent rounded-full animate-spin" />
+              <p className="text-xs text-[#5c6370] font-mono">Loading pose model...</p>
+            </div>
+          )}
+          {status === 'calibrating' && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+              <p className="text-[#f5c842] font-mono text-sm animate-pulse">
+                Hold still...
+              </p>
+            </div>
+          )}
+        </div>
+
         {status === 'loading' && (
-          <div className="flex flex-col items-center gap-4">
-            <div className="w-6 h-6 border-2 border-[#4a9eff] border-t-transparent rounded-full animate-spin" />
-            <p className="text-sm text-[#5c6370]">Loading pose detection...</p>
-          </div>
+          <p className="text-center text-sm text-[#5c6370]">Initializing camera and pose detection...</p>
         )}
 
         {(status === 'ready' || status === 'calibrating') && (
           <CalibrationView
-            videoRef={videoRef}
             status={status}
             error={error}
             isCalibrated={isCalibrated}
@@ -50,7 +70,6 @@ export default function MonitorPage() {
 
         {status === 'monitoring' && (
           <LivePreview
-            videoRef={videoRef}
             postureStatus={postureStatus}
             stats={stats}
             score={score}

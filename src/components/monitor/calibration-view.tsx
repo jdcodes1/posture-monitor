@@ -1,11 +1,9 @@
 'use client';
 
-import { type RefObject } from 'react';
 import type { Settings } from '@/lib/local-storage';
 import { SettingsPanel } from './settings-panel';
 
 interface CalibrationViewProps {
-  videoRef: RefObject<HTMLVideoElement | null>;
   status: 'ready' | 'calibrating';
   error: string | null;
   isCalibrated: boolean;
@@ -16,7 +14,6 @@ interface CalibrationViewProps {
 }
 
 export function CalibrationView({
-  videoRef,
   status,
   error,
   isCalibrated,
@@ -27,23 +24,6 @@ export function CalibrationView({
 }: CalibrationViewProps) {
   return (
     <div className="flex flex-col items-center gap-6 w-full max-w-md mx-auto">
-      <div className="relative w-full aspect-[4/3] rounded-lg overflow-hidden bg-[#141820] border border-[#252b38]">
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted
-          className="w-full h-full object-cover scale-x-[-1]"
-        />
-        {status === 'calibrating' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
-            <p className="text-[#f5c842] font-mono text-sm animate-pulse">
-              Hold still...
-            </p>
-          </div>
-        )}
-      </div>
-
       {error && (
         <p className="text-[#f5564a] text-sm text-center">{error}</p>
       )}
