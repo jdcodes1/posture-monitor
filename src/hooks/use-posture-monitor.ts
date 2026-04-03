@@ -37,9 +37,9 @@ export function usePostureMonitor(userId?: string | null) {
   const [settings, setSettings] = useState<Settings>(getSettings());
   const [error, setError] = useState<string | null>(null);
   const [isCalibrated, setIsCalibrated] = useState(false);
+  const [cameraReady, setCameraReady] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  // Hidden video for background checks (not in DOM but functional)
   const bgVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const cameraRef = useRef(new CameraManager());
@@ -52,6 +52,7 @@ export function usePostureMonitor(userId?: string | null) {
   const syncInitRef = useRef(false);
   const lastNotifiedStatusRef = useRef<PostureStatus>('good');
   const autoCalibrationTriggered = useRef(false);
+  const cameraStartedRef = useRef(false);
 
   // Sync state from MonitorState to React
   const syncState = useCallback(() => {
@@ -105,7 +106,7 @@ export function usePostureMonitor(userId?: string | null) {
     syncState();
   }, [detectOnce, settings.sensitivity, settings.notificationsEnabled, syncState]);
 
-  // Foreground rAF loop — uses the visible video element
+  // Foreground rAF loop
   const startForegroundLoop = useCallback(() => {
     const loop = () => {
       if (!isMonitoringRef.current || !isForegroundRef.current) return;
@@ -125,13 +126,12 @@ export function usePostureMonitor(userId?: string | null) {
     }
   }, []);
 
-  // Background setTimeout chain — creates a temporary hidden video
+  // Background setTimeout chain
   const startBackgroundLoop = useCallback(() => {
     const tick = async () => {
       if (!isMonitoringRef.current || isForegroundRef.current) return;
       const m = monitorRef.current;
       try {
-        // Create a temporary hidden video for background detection
         if (!bgVideoRef.current) {
           bgVideoRef.current = document.createElement('video');
           bgVideoRef.current.playsInline = true;
@@ -140,7 +140,6 @@ export function usePostureMonitor(userId?: string | null) {
         const bgVideo = bgVideoRef.current;
         const bgCam = new CameraManager();
         await bgCam.start(bgVideo);
-        // Wait for a usable frame
         await new Promise((r) => setTimeout(r, 300));
         processCheck(bgVideo);
         bgCam.stop(bgVideo);
@@ -165,7 +164,7 @@ export function usePostureMonitor(userId?: string | null) {
     }
   }, []);
 
-  // Set ready once MediaPipe loads
+  // Start camera immediately when status becomes 'ready' and video ref is available
   useEffect(() => {
     if (!mpLoading && !mpError) {
       setStatus('ready');
@@ -174,6 +173,28 @@ export function usePostureMonitor(userId?: string | null) {
       setError(mpError);
     }
   }, [mpLoading, mpError]);
+
+  // Start camera as soon as we're ready — poll for videoRef since it mounts async
+  useEffect(() => {
+    if (status !== 'ready' && status !== 'calibrating') return;
+    if (cameraStartedRef.current) return;
+
+    const tryStartCamera = () => {
+      const video = videoRef.current;
+      if (!video) {
+        // Video element not mounted yet, retry
+        setTimeout(tryStartCamera, 100);
+        return;
+      }
+      cameraStartedRef.current = true;
+      cameraRef.current.start(video).then(() => {
+        setCameraReady(true);
+      }).catch((e) => {
+        setError(e instanceof Error ? e.message : 'Camera access denied');
+      });
+    };
+    tryStartCamera();
+  }, [status]);
 
   // Load saved baseline on mount
   useEffect(() => {
@@ -214,7 +235,6 @@ export function usePostureMonitor(userId?: string | null) {
 
       if (visible) {
         stopBackgroundLoop();
-        // Re-start camera on the visible video element
         const video = videoRef.current;
         if (video) {
           cameraRef.current.start(video).then(() => {
@@ -241,26 +261,18 @@ export function usePostureMonitor(userId?: string | null) {
     };
   }, [stopForegroundLoop, stopBackgroundLoop]);
 
-  // Calibrate — starts camera on the visible video, takes 5 samples, auto-starts monitoring
+  // Calibrate — camera is already running, just take samples
   const calibrate = useCallback(async () => {
     setStatus('calibrating');
     setError(null);
     try {
       const video = videoRef.current;
-      if (!video) throw new Error('Video element not ready');
+      if (!video || video.readyState < 2) {
+        throw new Error('Camera not ready yet. Please wait a moment and try again.');
+      }
 
-      await cameraRef.current.start(video);
-
-      // Wait for camera to produce real frames
-      await new Promise<void>((resolve) => {
-        const check = () => {
-          if (video.readyState >= 2 && video.videoWidth > 0) return resolve();
-          setTimeout(check, 100);
-        };
-        check();
-      });
-      // Extra settle time for camera exposure/focus
-      await new Promise((r) => setTimeout(r, 800));
+      // Extra settle time for first calibration
+      await new Promise((r) => setTimeout(r, 500));
 
       const samples: PoseMetrics[] = [];
       let consecutiveMisses = 0;
@@ -285,7 +297,7 @@ export function usePostureMonitor(userId?: string | null) {
       saveBaseline(baseline);
       setIsCalibrated(true);
 
-      // Auto-start monitoring — camera is already running on videoRef
+      // Auto-start monitoring
       monitorRef.current.start();
       isMonitoringRef.current = true;
       setStatus('monitoring');
@@ -294,19 +306,19 @@ export function usePostureMonitor(userId?: string | null) {
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Calibration failed');
       setStatus('ready');
-      cameraRef.current.stop(videoRef.current ?? undefined);
     }
   }, [detectOnce, syncState, startForegroundLoop]);
 
-  // Auto-calibrate when model is ready and no saved baseline
+  // Auto-calibrate once camera is ready and model is loaded
   useEffect(() => {
-    if (status === 'ready' && !autoCalibrationTriggered.current && !isCalibrated) {
+    if (cameraReady && !autoCalibrationTriggered.current && !isCalibrated && landmarker.current) {
       autoCalibrationTriggered.current = true;
-      setTimeout(() => calibrate(), 300);
+      // Give camera a full second to warm up before auto-calibrating
+      setTimeout(() => calibrate(), 1000);
     }
-  }, [status, isCalibrated, calibrate]);
+  }, [cameraReady, isCalibrated, calibrate, landmarker]);
 
-  // Start monitoring (used when user has a saved baseline)
+  // Start monitoring (for saved baseline case)
   const startMonitoring = useCallback(async () => {
     const m = monitorRef.current;
     if (!m.baseline) return;
@@ -340,6 +352,11 @@ export function usePostureMonitor(userId?: string | null) {
   // Recalibrate
   const recalibrate = useCallback(() => {
     stopMonitoring();
+    // Restart camera for calibration view
+    const video = videoRef.current;
+    if (video) {
+      cameraRef.current.start(video).catch(() => {});
+    }
     calibrate();
   }, [stopMonitoring, calibrate]);
 
