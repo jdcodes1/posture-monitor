@@ -1,5 +1,4 @@
 import Vision
-import CoreImage
 
 enum PostureStatus: String {
     case good, warn, bad

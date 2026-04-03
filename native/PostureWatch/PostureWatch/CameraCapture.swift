@@ -1,9 +1,7 @@
 import AVFoundation
-import CoreVideo
 
 class CameraCapture: NSObject {
     private var captureSession: AVCaptureSession?
-    private var videoOutput: AVCaptureVideoDataOutput?
     private let queue = DispatchQueue(label: "com.posturewatch.camera")
     private var capturedFrame: CVPixelBuffer?
     private var frameSemaphore = DispatchSemaphore(value: 0)
@@ -57,7 +55,6 @@ class CameraCapture: NSObject {
         session.addOutput(output)
 
         captureSession = session
-        videoOutput = output
         return true
     }
 }

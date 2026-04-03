@@ -6,7 +6,6 @@ import SQLite3
 struct Settings: Codable {
     var interval: Int = 30
     var sensitivity: Double = 0.5
-    var launchAtLogin: Bool = false
 }
 
 class SettingsStore {

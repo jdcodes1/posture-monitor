@@ -25,6 +25,7 @@ class PostureMonitor {
     private let battery = BatteryMonitor()
     private let settingsStore = SettingsStore()
     private let statsStore = StatsStore()
+    private let dateFormatter = ISO8601DateFormatter()
 
     private var baseline: PoseMetrics?
     private(set) var settings: Settings
@@ -34,7 +35,6 @@ class PostureMonitor {
     private var isAway = false
     private var lastNotifiedBad = false
     private(set) var isPaused = false
-    private var currentStatus: PostureStatus = .good
 
     init() {
         settings = settingsStore.loadSettings()
@@ -139,7 +139,6 @@ class PostureMonitor {
             DispatchQueue.main.async {
                 self.missCount = 0
                 self.isAway = false
-                self.currentStatus = status
                 self.stats.checks += 1
 
                 if status == .good {
@@ -157,7 +156,7 @@ class PostureMonitor {
                 }
                 self.lastNotifiedBad = (status == .bad)
 
-                let today = ISO8601DateFormatter().string(from: Date()).prefix(10)
+                let today = self.dateFormatter.string(from: Date()).prefix(10)
                 self.statsStore.upsertDaily(
                     date: String(today),
                     checks: 1,
