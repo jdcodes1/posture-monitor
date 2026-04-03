@@ -2,7 +2,6 @@ export type PostureStatus = 'good' | 'warn' | 'bad';
 
 export interface PoseMetrics {
   earShoulderDist: number;
-  forwardLean: number;
   headHeight: number;
   shoulderTilt: number;
   noseShoulderDist: number;
@@ -30,7 +29,6 @@ export function extractMetrics(
 
   return {
     earShoulderDist: shoulderMidY - earMidY,
-    forwardLean: earMidY - shoulderMidY,
     headHeight: nose.y,
     shoulderTilt: Math.abs(leftShoulder.y - rightShoulder.y),
     noseShoulderDist: shoulderMidY - nose.y,
@@ -88,7 +86,6 @@ export function averageSamples(samples: PoseMetrics[]): PoseMetrics {
   const n = samples.length;
   return {
     earShoulderDist: samples.reduce((s, p) => s + p.earShoulderDist, 0) / n,
-    forwardLean: samples.reduce((s, p) => s + p.forwardLean, 0) / n,
     headHeight: samples.reduce((s, p) => s + p.headHeight, 0) / n,
     shoulderTilt: samples.reduce((s, p) => s + p.shoulderTilt, 0) / n,
     noseShoulderDist: samples.reduce((s, p) => s + p.noseShoulderDist, 0) / n,

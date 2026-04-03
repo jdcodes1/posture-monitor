@@ -3,7 +3,6 @@ import { compareToBaseline, averageSamples, type PoseMetrics } from './pose-engi
 
 const baseline: PoseMetrics = {
   earShoulderDist: 0.15,
-  forwardLean: -0.15,
   headHeight: 0.3,
   shoulderTilt: 0.01,
   noseShoulderDist: 0.18,
@@ -48,8 +47,8 @@ describe('compareToBaseline', () => {
 describe('averageSamples', () => {
   it('averages multiple pose samples', () => {
     const samples: PoseMetrics[] = [
-      { earShoulderDist: 0.1, forwardLean: -0.1, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.2 },
-      { earShoulderDist: 0.2, forwardLean: -0.2, headHeight: 0.4, shoulderTilt: 0.03, noseShoulderDist: 0.3 },
+      { earShoulderDist: 0.1, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.2 },
+      { earShoulderDist: 0.2, headHeight: 0.4, shoulderTilt: 0.03, noseShoulderDist: 0.3 },
     ];
     const avg = averageSamples(samples);
     expect(avg.earShoulderDist).toBeCloseTo(0.15);

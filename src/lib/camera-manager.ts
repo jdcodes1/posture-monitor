@@ -34,12 +34,4 @@ export class CameraManager {
       this.video = null;
     }
   }
-
-  getStream(): MediaStream | null {
-    return this.stream;
-  }
-
-  isActive(): boolean {
-    return this.stream !== null;
-  }
 }

@@ -39,7 +39,6 @@ export function usePostureMonitor(userId?: string | null) {
   const [isCalibrated, setIsCalibrated] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
 
   const cameraRef = useRef(new CameraManager());
   const monitorRef = useRef(new MonitorState());
@@ -103,7 +102,7 @@ export function usePostureMonitor(userId?: string | null) {
       }
     }
     syncState();
-  }, [detectOnce, settings.sensitivity, syncState]);
+  }, [detectOnce, settings.sensitivity, settings.notificationsEnabled, syncState]);
 
   // Foreground rAF loop
   const startForegroundLoop = useCallback(() => {
@@ -335,7 +334,6 @@ export function usePostureMonitor(userId?: string | null) {
     error,
     isCalibrated,
     videoRef,
-    canvasRef,
     calibrate,
     startMonitoring,
     stopMonitoring,

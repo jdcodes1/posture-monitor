@@ -14,7 +14,6 @@ export default function MonitorPage() {
     error,
     isCalibrated,
     videoRef,
-    canvasRef,
     calibrate,
     startMonitoring,
     stopMonitoring,
@@ -52,7 +51,6 @@ export default function MonitorPage() {
         {status === 'monitoring' && (
           <LivePreview
             videoRef={videoRef}
-            canvasRef={canvasRef}
             postureStatus={postureStatus}
             stats={stats}
             score={score}

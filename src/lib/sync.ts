@@ -74,10 +74,7 @@ export class StatSync {
     if (!this.userId || this.buffer.dailyChecks === 0) return;
 
     const today = new Date().toISOString().split('T')[0];
-    const avgScore =
-      this.buffer.dailyChecks > 0
-        ? Math.round((this.buffer.dailyGoodChecks / this.buffer.dailyChecks) * 100)
-        : 0;
+    const avgScore = Math.round((this.buffer.dailyGoodChecks / this.buffer.dailyChecks) * 100);
 
     try {
       // Sync daily stats

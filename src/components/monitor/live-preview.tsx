@@ -6,7 +6,6 @@ import type { SessionStats } from '@/lib/monitor-controller';
 
 interface LivePreviewProps {
   videoRef: RefObject<HTMLVideoElement | null>;
-  canvasRef: RefObject<HTMLCanvasElement | null>;
   postureStatus: PostureStatus | 'away';
   stats: SessionStats;
   score: number;
@@ -30,7 +29,6 @@ const STATUS_LABELS: Record<PostureStatus | 'away', string> = {
 
 export function LivePreview({
   videoRef,
-  canvasRef,
   postureStatus,
   stats,
   score,
@@ -48,10 +46,6 @@ export function LivePreview({
           playsInline
           muted
           className="w-full h-full object-cover scale-x-[-1]"
-        />
-        <canvas
-          ref={canvasRef}
-          className="absolute inset-0 w-full h-full pointer-events-none scale-x-[-1]"
         />
       </div>
 

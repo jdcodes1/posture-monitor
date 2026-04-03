@@ -9,7 +9,7 @@ describe('MonitorState', () => {
 
   it('transitions to monitoring after calibration', () => {
     const state = new MonitorState();
-    state.calibrate({ earShoulderDist: 0.15, forwardLean: -0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
+    state.calibrate({ earShoulderDist: 0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
     expect(state.status).toBe('calibrated');
     state.start();
     expect(state.status).toBe('monitoring');
@@ -17,7 +17,7 @@ describe('MonitorState', () => {
 
   it('tracks away state after 3 missed detections', () => {
     const state = new MonitorState();
-    state.calibrate({ earShoulderDist: 0.15, forwardLean: -0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
+    state.calibrate({ earShoulderDist: 0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
     state.start();
     state.recordMiss();
     state.recordMiss();
@@ -28,7 +28,7 @@ describe('MonitorState', () => {
 
   it('resets away state on successful detection', () => {
     const state = new MonitorState();
-    state.calibrate({ earShoulderDist: 0.15, forwardLean: -0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
+    state.calibrate({ earShoulderDist: 0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
     state.start();
     state.recordMiss();
     state.recordMiss();
@@ -40,7 +40,7 @@ describe('MonitorState', () => {
 
   it('tracks session stats correctly', () => {
     const state = new MonitorState();
-    state.calibrate({ earShoulderDist: 0.15, forwardLean: -0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
+    state.calibrate({ earShoulderDist: 0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
     state.start();
     state.recordHit('good');
     state.recordHit('good');
@@ -52,7 +52,7 @@ describe('MonitorState', () => {
 
   it('calculates score correctly', () => {
     const state = new MonitorState();
-    state.calibrate({ earShoulderDist: 0.15, forwardLean: -0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
+    state.calibrate({ earShoulderDist: 0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
     state.start();
     state.recordHit('good');
     state.recordHit('good');
@@ -62,7 +62,7 @@ describe('MonitorState', () => {
 
   it('calculates effective interval with away and low battery', () => {
     const state = new MonitorState();
-    state.calibrate({ earShoulderDist: 0.15, forwardLean: -0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
+    state.calibrate({ earShoulderDist: 0.15, headHeight: 0.3, shoulderTilt: 0.01, noseShoulderDist: 0.18 });
     state.start();
     expect(state.getEffectiveInterval(30, false)).toBe(30);
     state.recordMiss(); state.recordMiss(); state.recordMiss();
