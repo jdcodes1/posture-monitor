@@ -264,9 +264,18 @@ class StatusBarController: NSObject, PostureMonitorDelegate {
         statusMenuItem.title = message
     }
 
-    func liveAnalysisResult(_ result: PoseAnalysisResult?) {
+    func liveAnalysisResult(_ result: PoseAnalysisResult?, status: PostureStatus?) {
         // Called on main thread from PostureMonitor
         overlayView?.landmarks = result?.landmarks
+        if let status {
+            overlayView?.postureStatus = status
+            // Color the preview border to show status
+            let color = colors[status] ?? grayColor
+            previewMenuItem.view?.layer?.borderColor = color.cgColor
+            previewMenuItem.view?.layer?.borderWidth = 3
+        } else {
+            previewMenuItem.view?.layer?.borderWidth = 0
+        }
         overlayView?.display() // Force redraw in NSMenu context
     }
 

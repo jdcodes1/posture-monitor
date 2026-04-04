@@ -5,7 +5,7 @@ import UserNotifications
 protocol PostureMonitorDelegate: AnyObject {
     func postureDidChange(status: PostureStatus, stats: MonitorStats)
     func calibrationDidUpdate(message: String)
-    func liveAnalysisResult(_ result: PoseAnalysisResult?)
+    func liveAnalysisResult(_ result: PoseAnalysisResult?, status: PostureStatus?)
 }
 
 struct MonitorStats {
@@ -79,8 +79,13 @@ class PostureMonitor {
         if liveAnalysisEnabled && (now - lastLiveAnalysisTime) >= liveAnalysisInterval {
             lastLiveAnalysisTime = now
             let result = analyzer.analyze(pixelBuffer: pixelBuffer)
+            // Compute live posture status if calibrated
+            var liveStatus: PostureStatus? = nil
+            if let result, let baseline {
+                liveStatus = analyzer.compare(current: result.metrics, baseline: baseline, sensitivity: CGFloat(settings.sensitivity))
+            }
             DispatchQueue.main.async { [weak self] in
-                self?.delegate?.liveAnalysisResult(result)
+                self?.delegate?.liveAnalysisResult(result, status: liveStatus)
             }
         }
 
