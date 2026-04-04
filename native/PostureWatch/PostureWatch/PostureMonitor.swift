@@ -1,9 +1,11 @@
 import Foundation
+import CoreVideo
 import UserNotifications
 
 protocol PostureMonitorDelegate: AnyObject {
     func postureDidChange(status: PostureStatus, stats: MonitorStats)
     func calibrationDidUpdate(message: String)
+    func liveAnalysisResult(_ result: PoseAnalysisResult?)
 }
 
 struct MonitorStats {
@@ -37,78 +39,134 @@ class PostureMonitor {
     private var lastNotifiedBad = false
     private(set) var isPaused = false
 
+    /// Enable live analysis (sends every frame result to delegate)
+    var liveAnalysisEnabled = false
+
+    /// Used to throttle live analysis
+    private var lastLiveAnalysisTime: TimeInterval = 0
+    private let liveAnalysisInterval: TimeInterval = 0.15 // ~7fps
+
+    /// Semaphore + result storage for synchronous single-frame capture
+    private var captureResult: PoseAnalysisResult?
+    private var captureWaiting = false
+    private var captureSemaphore = DispatchSemaphore(value: 0)
+
     init() {
         settings = settingsStore.loadSettings()
         baseline = settingsStore.loadBaseline()
 
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+
+        // Set up frame handler — this runs on the camera's background queue
+        camera.onFrame = { [weak self] pixelBuffer in
+            self?.handleFrame(pixelBuffer)
+        }
     }
 
     var isCalibrated: Bool { baseline != nil }
 
+    // MARK: - Frame Handling (runs on camera queue — pixelBuffer is valid here)
+
+    private var frameCount = 0
+    private func handleFrame(_ pixelBuffer: CVPixelBuffer) {
+        frameCount += 1
+        if frameCount <= 3 || frameCount % 30 == 0 {
+            pwLog("handleFrame called (frame #\(frameCount), captureWaiting=\(captureWaiting))")
+        }
+        let now = ProcessInfo.processInfo.systemUptime
+
+        // Live analysis for overlay (throttled)
+        if liveAnalysisEnabled && (now - lastLiveAnalysisTime) >= liveAnalysisInterval {
+            lastLiveAnalysisTime = now
+            let result = analyzer.analyze(pixelBuffer: pixelBuffer)
+            DispatchQueue.main.async { [weak self] in
+                self?.delegate?.liveAnalysisResult(result)
+            }
+        }
+
+        // Single-frame capture (for calibration / background checks)
+        if captureWaiting {
+            captureResult = analyzer.analyze(pixelBuffer: pixelBuffer)
+            captureWaiting = false
+            captureSemaphore.signal()
+        }
+    }
+
+    /// Capture and analyze a single frame. Blocks until result is ready.
+    /// Must NOT be called from the camera queue.
+    private func captureAndAnalyze(timeout: TimeInterval = 3.0) -> PoseAnalysisResult? {
+        captureResult = nil
+        captureWaiting = true
+        let result = captureSemaphore.wait(timeout: .now() + timeout)
+        captureWaiting = false
+        if result == .timedOut { return nil }
+        return captureResult
+    }
+
     // MARK: - Calibration
 
     func calibrate(completion: @escaping (Bool) -> Void) {
+        pwLog("calibrate() called")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
+            guard let self else { pwLog("self is nil in calibrate"); return }
+            pwLog("calibrate async block started")
 
-            // Start camera and wait for it to be running
-            let semaphore = DispatchSemaphore(value: 0)
-            self.camera.start { _ in semaphore.signal() }
-            semaphore.wait()
-
-            // Wait for camera warmup — first few frames are often black/blurry
-            DispatchQueue.main.async {
-                self.delegate?.calibrationDidUpdate(message: "Starting camera...")
+            // Start camera
+            let startSemaphore = DispatchSemaphore(value: 0)
+            self.camera.start { success in
+                pwLog("Camera started for calibration: \(success)")
+                startSemaphore.signal()
             }
-            Thread.sleep(forTimeInterval: 1.5)
+            startSemaphore.wait()
 
-            // Wait for first valid frame
-            guard self.camera.waitForFrame(timeout: 5.0) != nil else {
-                NSLog("[PostureWatch] No frames received from camera")
+            guard self.camera.isRunning else {
+                pwLog(" Camera failed to start")
                 DispatchQueue.main.async {
-                    self.delegate?.calibrationDidUpdate(message: "Camera not responding")
+                    self.delegate?.calibrationDidUpdate(message: "Camera failed to start")
                     completion(false)
                 }
                 return
             }
 
+            // Wait for camera warmup
             DispatchQueue.main.async {
-                self.delegate?.calibrationDidUpdate(message: "Sit up straight... detecting pose")
+                self.delegate?.calibrationDidUpdate(message: "Starting camera...")
+            }
+            Thread.sleep(forTimeInterval: 2.0)
+
+            // First, verify we can get ANY frame
+            DispatchQueue.main.async {
+                self.delegate?.calibrationDidUpdate(message: "Detecting pose...")
             }
 
             var samples: [PoseMetrics] = []
             var attempts = 0
 
-            while samples.count < 5 && attempts < 20 {
+            while samples.count < 5 && attempts < 25 {
                 attempts += 1
-                Thread.sleep(forTimeInterval: 0.5)
 
-                guard let frame = self.camera.latestFrame else {
-                    NSLog("[PostureWatch] Calibration attempt \(attempts): no frame")
-                    continue
-                }
-
-                if let result = self.analyzer.analyze(pixelBuffer: frame) {
+                if let result = self.captureAndAnalyze(timeout: 2.0) {
                     samples.append(result.metrics)
-                    NSLog("[PostureWatch] Calibration sample \(samples.count)/5 captured")
+                    pwLog(" Calibration sample \(samples.count)/5 (attempt \(attempts))")
                     DispatchQueue.main.async {
                         self.delegate?.calibrationDidUpdate(message: "Capturing... \(samples.count)/5")
                     }
                 } else {
-                    NSLog("[PostureWatch] Calibration attempt \(attempts): pose not detected")
+                    pwLog(" Calibration attempt \(attempts): no pose detected")
                 }
+
+                Thread.sleep(forTimeInterval: 0.4)
             }
 
             DispatchQueue.main.async {
                 if samples.count >= 2 {
                     self.baseline = self.analyzer.average(samples: samples)
                     self.settingsStore.saveBaseline(self.baseline!)
-                    NSLog("[PostureWatch] Calibration succeeded with \(samples.count) samples")
+                    pwLog(" Calibration succeeded with \(samples.count) samples")
                     completion(true)
                 } else {
-                    NSLog("[PostureWatch] Calibration failed: only \(samples.count) samples")
-                    self.delegate?.calibrationDidUpdate(message: "Failed — could not detect pose (\(samples.count)/2 needed)")
+                    pwLog(" Calibration failed: only \(samples.count) samples from \(attempts) attempts")
+                    self.delegate?.calibrationDidUpdate(message: "Failed — \(samples.count) poses detected in \(attempts) attempts")
                     completion(false)
                 }
             }
@@ -161,17 +219,19 @@ class PostureMonitor {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self, let baseline = self.baseline else { return }
 
-            // Start camera, get a frame, stop camera
-            let semaphore = DispatchSemaphore(value: 0)
-            self.camera.start { _ in semaphore.signal() }
-            semaphore.wait()
+            // Start camera, capture one frame with analysis, stop camera
+            let startSemaphore = DispatchSemaphore(value: 0)
+            self.camera.start { _ in startSemaphore.signal() }
+            startSemaphore.wait()
 
-            // Wait for a fresh frame
-            Thread.sleep(forTimeInterval: 0.3)
+            // Wait for camera warmup
+            Thread.sleep(forTimeInterval: 0.5)
 
-            guard let frame = self.camera.latestFrame,
-                  let result = self.analyzer.analyze(pixelBuffer: frame) else {
-                self.camera.stop()
+            let result = self.captureAndAnalyze(timeout: 3.0)
+
+            self.camera.stop()
+
+            guard let result else {
                 DispatchQueue.main.async {
                     self.missCount += 1
                     if self.missCount >= 3 {
@@ -181,8 +241,6 @@ class PostureMonitor {
                 }
                 return
             }
-
-            self.camera.stop()
 
             let status = self.analyzer.compare(
                 current: result.metrics,

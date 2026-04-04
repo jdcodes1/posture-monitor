@@ -2,17 +2,12 @@ import AVFoundation
 
 class CameraCapture: NSObject {
     private(set) var captureSession: AVCaptureSession?
-    private let queue = DispatchQueue(label: "com.posturewatch.camera")
-    private var _latestFrame: CVPixelBuffer?
-    private let lock = NSLock()
+    private let captureQueue = DispatchQueue(label: "com.posturewatch.camera")
     private(set) var isRunning = false
 
-    /// Thread-safe access to the latest frame
-    var latestFrame: CVPixelBuffer? {
-        lock.lock()
-        defer { lock.unlock() }
-        return _latestFrame
-    }
+    /// Called on every frame with the pixel buffer. Set this to process frames.
+    /// Called on captureQueue (background thread). Buffer is only valid during the call.
+    var onFrame: ((CVPixelBuffer) -> Void)?
 
     static func requestAccess(completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -27,7 +22,6 @@ class CameraCapture: NSObject {
         }
     }
 
-    /// Start the camera. Can be called from any thread.
     func start(completion: ((Bool) -> Void)? = nil) {
         if isRunning {
             completion?(true)
@@ -35,23 +29,24 @@ class CameraCapture: NSObject {
         }
         if captureSession == nil {
             guard setupSession() else {
+                pwLog(" Failed to setup camera session")
                 completion?(false)
                 return
             }
         }
-        // startRunning blocks, so do it off main thread
-        queue.async { [weak self] in
+        captureQueue.async { [weak self] in
             self?.captureSession?.startRunning()
+            let running = self?.captureSession?.isRunning ?? false
+            pwLog(" Camera startRunning completed, isRunning: \(running)")
             DispatchQueue.main.async {
-                self?.isRunning = true
-                completion?(true)
+                self?.isRunning = running
+                completion?(running)
             }
         }
     }
 
-    /// Stop the camera.
     func stop() {
-        queue.async { [weak self] in
+        captureQueue.async { [weak self] in
             self?.captureSession?.stopRunning()
             DispatchQueue.main.async {
                 self?.isRunning = false
@@ -59,41 +54,37 @@ class CameraCapture: NSObject {
         }
     }
 
-    /// Wait up to `timeout` seconds for a valid frame. Camera must be started.
-    func waitForFrame(timeout: TimeInterval = 3.0) -> CVPixelBuffer? {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if let frame = latestFrame {
-                return frame
-            }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        return nil
-    }
-
     private func setupSession() -> Bool {
         let session = AVCaptureSession()
-        session.sessionPreset = .medium
+        session.sessionPreset = .high // Higher quality for better pose detection
 
         // Try front camera first, then any camera
         let device: AVCaptureDevice?
         if let front = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front) {
             device = front
+            pwLog(" Using front camera")
+        } else if let any = AVCaptureDevice.default(for: .video) {
+            device = any
+            pwLog(" Using default camera")
         } else {
-            device = AVCaptureDevice.default(for: .video)
+            device = nil
         }
 
         guard let device, let input = try? AVCaptureDeviceInput(device: device) else {
-            NSLog("[PostureWatch] No camera device found")
+            pwLog(" No camera device found")
             return false
         }
 
         let output = AVCaptureVideoDataOutput()
-        output.setSampleBufferDelegate(self, queue: queue)
+        output.setSampleBufferDelegate(self, queue: captureQueue)
         output.alwaysDiscardsLateVideoFrames = true
+        // Use 32BGRA format which Vision framework prefers
+        output.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
 
         guard session.canAddInput(input), session.canAddOutput(output) else {
-            NSLog("[PostureWatch] Cannot configure capture session")
+            pwLog(" Cannot add input/output to session")
             return false
         }
 
@@ -101,7 +92,7 @@ class CameraCapture: NSObject {
         session.addOutput(output)
 
         captureSession = session
-        NSLog("[PostureWatch] Camera session configured")
+        pwLog(" Camera session configured successfully")
         return true
     }
 }
@@ -109,8 +100,7 @@ class CameraCapture: NSObject {
 extension CameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        lock.lock()
-        _latestFrame = pixelBuffer
-        lock.unlock()
+        // Call the frame handler — buffer is valid only during this callback
+        onFrame?(pixelBuffer)
     }
 }

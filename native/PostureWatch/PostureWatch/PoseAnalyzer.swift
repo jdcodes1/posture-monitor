@@ -1,4 +1,5 @@
 import Vision
+import AppKit
 
 enum PostureStatus: String {
     case good, warn, bad
@@ -32,13 +33,23 @@ struct PoseAnalysisResult {
 class PoseAnalyzer {
 
     func analyze(pixelBuffer: CVPixelBuffer) -> PoseAnalysisResult? {
+        let w = CVPixelBufferGetWidth(pixelBuffer)
+        let h = CVPixelBufferGetHeight(pixelBuffer)
+
         let request = VNDetectHumanBodyPoseRequest()
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
 
         do {
             try handler.perform([request])
         } catch {
+            pwLog("Vision perform failed: \(error)")
             return nil
+        }
+
+        let count = request.results?.count ?? 0
+        if count == 0 {
+            // Fallback: try face detection for basic posture tracking
+            return analyzeFallback(pixelBuffer: pixelBuffer, width: w, height: h)
         }
 
         guard let observation = request.results?.first else { return nil }
@@ -90,6 +101,56 @@ class PoseAnalyzer {
         } catch {
             return nil
         }
+    }
+
+    /// Fallback: use face detection to estimate posture from face position/size
+    private func analyzeFallback(pixelBuffer: CVPixelBuffer, width: Int, height: Int) -> PoseAnalysisResult? {
+        let faceRequest = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
+
+        do {
+            try handler.perform([faceRequest])
+        } catch {
+            return nil
+        }
+
+        guard let face = faceRequest.results?.first else {
+            pwLog("Vision fallback: no face detected (frame \(width)x\(height))")
+            return nil
+        }
+
+        let bbox = face.boundingBox
+        // Use face position as proxy for posture:
+        // - headHeight: face center Y (lower = slouching)
+        // - earShoulderDist: face height (smaller = further away / slouching)
+        // - shoulderTilt: 0 (can't measure from face alone)
+        // - noseShoulderDist: face center Y (same as headHeight for fallback)
+        let faceCenterY = bbox.origin.y + bbox.height / 2
+        let faceHeight = bbox.height
+
+        let metrics = PoseMetrics(
+            earShoulderDist: faceHeight,
+            headHeight: faceCenterY,
+            shoulderTilt: 0,
+            noseShoulderDist: faceCenterY
+        )
+
+        // Approximate landmark positions from face bbox for visualization
+        let landmarks = PoseLandmarks(
+            nose: CGPoint(x: bbox.midX, y: bbox.origin.y + bbox.height * 0.35),
+            leftEar: CGPoint(x: bbox.origin.x, y: bbox.midY),
+            rightEar: CGPoint(x: bbox.maxX, y: bbox.midY),
+            leftShoulder: CGPoint(x: bbox.origin.x - bbox.width * 0.3, y: bbox.origin.y - bbox.height * 0.5),
+            rightShoulder: CGPoint(x: bbox.maxX + bbox.width * 0.3, y: bbox.origin.y - bbox.height * 0.5),
+            leftElbow: nil,
+            rightElbow: nil,
+            leftHip: nil,
+            rightHip: nil
+        )
+
+        pwLog("Vision fallback: face detected at y=\(String(format: "%.3f", faceCenterY)) h=\(String(format: "%.3f", faceHeight))")
+
+        return PoseAnalysisResult(metrics: metrics, landmarks: landmarks)
     }
 
     func compare(current: PoseMetrics, baseline: PoseMetrics, sensitivity: CGFloat) -> PostureStatus {
